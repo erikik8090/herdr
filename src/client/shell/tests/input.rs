@@ -958,3 +958,114 @@ fn every_configured_prefix_enters_prefix_mode() {
         assert_eq!(state.mode, ClientShellMode::Terminal);
     }
 }
+
+fn repeat_shell() -> ClientShellState {
+    let config: Config = toml::from_str(
+        r#"
+[keys]
+focus_pane_left = { key = "prefix+h", repeat = true }
+"#,
+    )
+    .unwrap();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+    state
+}
+
+fn press(state: &mut ClientShellState, code: KeyCode, modifiers: KeyModifiers) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        code, modifiers,
+    ))])
+}
+
+fn focus_requests(outcome: &ClientShellInput) -> usize {
+    outcome
+        .actions
+        .iter()
+        .filter(|action| {
+            matches!(action, ClientShellAction::Endpoint { request, .. }
+                if matches!(request.method, crate::api::schema::Method::PaneFocusDirection(_)))
+        })
+        .count()
+}
+
+fn sends_pane_input(outcome: &ClientShellInput) -> bool {
+    outcome
+        .requests
+        .iter()
+        .any(|request| matches!(request, ClientMessage::ClientShellPaneInput { .. }))
+}
+
+#[test]
+fn repeatable_prefix_binding_repeats_on_bare_key() {
+    let mut state = repeat_shell();
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+    for _ in 0..3 {
+        let outcome = press(&mut state, KeyCode::Char('h'), KeyModifiers::empty());
+        assert_eq!(focus_requests(&outcome), 1);
+        assert!(!sends_pane_input(&outcome));
+        assert_eq!(state.mode, ClientShellMode::Prefix);
+        assert!(state.prefix_repeat_deadline.is_some());
+    }
+}
+
+#[test]
+fn non_repeatable_key_during_repeat_window_reaches_the_pane() {
+    let mut state = repeat_shell();
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('h'), KeyModifiers::empty());
+
+    // prefix+j is bound but not repeatable, so the bare j is ordinary input.
+    let outcome = press(&mut state, KeyCode::Char('j'), KeyModifiers::empty());
+
+    assert_eq!(focus_requests(&outcome), 0);
+    assert!(sends_pane_input(&outcome));
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.prefix_repeat_deadline.is_none());
+}
+
+#[test]
+fn prefix_during_repeat_window_starts_a_fresh_prefix() {
+    let mut state = repeat_shell();
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('h'), KeyModifiers::empty());
+
+    let outcome = press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    assert!(!sends_pane_input(&outcome));
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+    assert!(state.prefix_repeat_deadline.is_none());
+
+    let outcome = press(&mut state, KeyCode::Char('j'), KeyModifiers::empty());
+    assert_eq!(focus_requests(&outcome), 1);
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}
+
+#[test]
+fn expired_repeat_window_returns_to_terminal() {
+    let mut state = repeat_shell();
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('h'), KeyModifiers::empty());
+    let deadline = state.prefix_repeat_deadline.unwrap();
+
+    assert!(!state.tick_prefix_repeat(deadline - std::time::Duration::from_millis(1)));
+    assert_eq!(state.mode, ClientShellMode::Prefix);
+    assert!(state.tick_prefix_repeat(deadline));
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+    assert!(state.prefix_repeat_deadline.is_none());
+}
+
+#[test]
+fn key_after_expired_window_before_tick_reaches_the_pane() {
+    let mut state = repeat_shell();
+    press(&mut state, KeyCode::Char('b'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Char('h'), KeyModifiers::empty());
+    state.prefix_repeat_deadline =
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+
+    let outcome = press(&mut state, KeyCode::Char('h'), KeyModifiers::empty());
+
+    assert_eq!(focus_requests(&outcome), 0);
+    assert!(sends_pane_input(&outcome));
+    assert_eq!(state.mode, ClientShellMode::Terminal);
+}

@@ -47,6 +47,17 @@ impl LiveKeybindConfig {
 pub enum BindingConfig {
     One(String),
     Many(Vec<String>),
+    Table(BindingTableConfig),
+}
+
+/// Table form of a binding, e.g. `{ key = "prefix+h", repeat = true }`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(default)]
+pub struct BindingTableConfig {
+    pub key: Box<BindingConfig>,
+    /// After the prefix binding fires, tapping its key again within the repeat
+    /// window runs it again without pressing the prefix.
+    pub repeat: bool,
 }
 
 impl Default for BindingConfig {
@@ -68,13 +79,19 @@ impl BindingConfig {
         match self {
             Self::One(value) => vec![value.as_str()],
             Self::Many(values) => values.iter().map(String::as_str).collect(),
+            Self::Table(table) => table.key.values(),
         }
+    }
+
+    pub(crate) fn repeat(&self) -> bool {
+        matches!(self, Self::Table(table) if table.repeat)
     }
 
     pub(crate) fn into_values(self) -> Vec<String> {
         match self {
             Self::One(value) => vec![value],
             Self::Many(values) => values,
+            Self::Table(table) => table.key.into_values(),
         }
     }
 
@@ -199,6 +216,7 @@ impl ResolvedBinding {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActionKeybinds {
     pub bindings: Vec<ResolvedBinding>,
+    pub repeat: bool,
 }
 
 impl ActionKeybinds {
@@ -211,7 +229,10 @@ impl ActionKeybinds {
                 None => return Err(format!("invalid endpoint command binding: {label}")),
             }
         }
-        Ok(Self { bindings })
+        Ok(Self {
+            bindings,
+            repeat: false,
+        })
     }
 
     #[cfg(test)]
@@ -229,6 +250,7 @@ impl ActionKeybinds {
             .expect("prefix binding should parse");
         Self {
             bindings: vec![trigger],
+            repeat: false,
         }
     }
 
@@ -242,6 +264,7 @@ impl ActionKeybinds {
             .expect("direct binding should parse");
         Self {
             bindings: vec![trigger],
+            repeat: false,
         }
     }
 
@@ -890,7 +913,18 @@ fn parse_action_bindings(
             }
         }
     }
-    ActionKeybinds { bindings }
+    ActionKeybinds {
+        bindings,
+        repeat: config.repeat(),
+    }
+}
+
+fn reject_repeat(field: &str, config: &BindingConfig, diagnostics: &mut Vec<String>) {
+    if config.repeat() {
+        let diag = format!("repeat is not supported for {field}; ignoring");
+        warn!(message = %diag, "config diagnostic");
+        diagnostics.push(diag);
+    }
 }
 
 fn parse_navigate_bindings(
@@ -900,6 +934,7 @@ fn parse_navigate_bindings(
     diagnostics: &mut Vec<String>,
     source: BindingSource,
 ) -> ActionKeybinds {
+    reject_repeat(field, config, diagnostics);
     let mut bindings = Vec::new();
     for raw in config.values() {
         let raw = raw.trim();
@@ -926,7 +961,10 @@ fn parse_navigate_bindings(
             }
         }
     }
-    ActionKeybinds { bindings }
+    ActionKeybinds {
+        bindings,
+        repeat: false,
+    }
 }
 
 fn parse_indexed_bindings(
@@ -936,6 +974,7 @@ fn parse_indexed_bindings(
     diagnostics: &mut Vec<String>,
     source: BindingSource,
 ) -> Vec<IndexedKeybind> {
+    reject_repeat(field, config, diagnostics);
     let mut bindings = Vec::new();
     for raw in config.values() {
         let raw = raw.trim();
@@ -1602,6 +1641,48 @@ mod tests {
             parse_key_combo("alt+é"),
             Some((KeyCode::Char('é'), KeyModifiers::ALT))
         );
+    }
+
+    #[test]
+    fn binding_table_parses_repeat_flag() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+focus_pane_left = { key = ["prefix+h", "ctrl+alt+h"], repeat = true }
+focus_pane_down = "prefix+j"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        assert!(kb.focus_pane_left.repeat);
+        assert_eq!(
+            binding_triggers(&kb.focus_pane_left),
+            vec![
+                BindingTrigger::Prefix((KeyCode::Char('h'), KeyModifiers::empty())),
+                BindingTrigger::Direct((
+                    KeyCode::Char('h'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT
+                )),
+            ]
+        );
+        assert!(!kb.focus_pane_down.repeat);
+        assert!(config.collect_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn repeat_on_indexed_binding_is_diagnosed() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+switch_tab = { key = "prefix+1..9", repeat = true }
+"#,
+        )
+        .unwrap();
+        assert!(config
+            .collect_diagnostics()
+            .iter()
+            .any(|diag| diag.contains("repeat is not supported for keys.switch_tab")));
+        assert_eq!(config.keybinds().switch_tab.len(), 9);
     }
 
     #[test]

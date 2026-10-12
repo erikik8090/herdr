@@ -4,6 +4,8 @@ use crate::raw_input::RawInputEvent;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 const LOCAL_INPUT_SOURCE: u8 = 0;
+/// How long prefix mode stays open after a repeatable binding, as tmux `repeat-time`.
+const PREFIX_REPEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn is_retained_selection_copy_key(key: &crate::input::TerminalKey) -> bool {
     matches!(key.code, KeyCode::Char('c' | 'C'))
@@ -671,6 +673,7 @@ impl ClientShellState {
                 }
                 if self.config.keybinds.matches_prefix(key) {
                     self.mode = ClientShellMode::Prefix;
+                    self.prefix_repeat_deadline = None;
                     outcome.repaint = true;
                     return None;
                 }
@@ -684,7 +687,23 @@ impl ClientShellState {
                 } else {
                     ClientShellMode::Terminal
                 };
+                // During a repeat window, only repeatable bindings stay in Herdr;
+                // anything else leaves prefix mode and is handled as a normal key,
+                // like tmux `bind -r`.
+                let repeating = match self.prefix_repeat_deadline.take() {
+                    Some(deadline) if std::time::Instant::now() < deadline => true,
+                    Some(_) => {
+                        self.mode = return_mode;
+                        outcome.repaint = true;
+                        return self.route_key_press(key, outcome);
+                    }
+                    None => false,
+                };
                 if self.config.keybinds.matches_prefix(key) {
+                    if repeating {
+                        outcome.repaint = true;
+                        return None;
+                    }
                     self.mode = return_mode;
                     outcome.repaint = true;
                     return self.focused_pane_id().map(ClientInputTarget::Pane);
@@ -697,13 +716,28 @@ impl ClientShellState {
                 if let Some(binding) =
                     crate::input::resolve_prefix_binding(&self.config.keybinds.keybinds, key)
                 {
+                    let repeats =
+                        crate::input::binding_repeats(&self.config.keybinds.keybinds, &binding);
                     self.mode = return_mode;
                     outcome.repaint = true;
+                    if repeating && !repeats {
+                        return self.route_key_press(key, outcome);
+                    }
                     self.record_binding(binding, outcome);
+                    // Only re-arm when the action left the shell where it was; an
+                    // action that opened a mode or overlay owns the next key.
+                    if repeats && self.mode == return_mode && self.overlay.is_none() {
+                        self.mode = ClientShellMode::Prefix;
+                        self.prefix_repeat_deadline =
+                            Some(std::time::Instant::now() + PREFIX_REPEAT_TIMEOUT);
+                    }
                     return None;
                 }
                 self.mode = return_mode;
                 outcome.repaint = true;
+                if repeating {
+                    return self.route_key_press(key, outcome);
+                }
                 None
             }
             ClientShellMode::Navigate => {
@@ -722,6 +756,7 @@ impl ClientShellState {
                     && self.config.keybinds.matches_prefix(key)
                 {
                     self.mode = ClientShellMode::Prefix;
+                    self.prefix_repeat_deadline = None;
                     outcome.repaint = true;
                 } else {
                     self.route_copy_mode_key(key, outcome);

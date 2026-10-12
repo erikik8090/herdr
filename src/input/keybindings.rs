@@ -1,6 +1,6 @@
 use crossterm::event::KeyCode;
 
-use crate::config::{CustomCommandKeybind, Keybinds};
+use crate::config::{ActionKeybinds, CustomCommandKeybind, Keybinds};
 
 use super::TerminalKey;
 
@@ -95,7 +95,22 @@ pub(crate) fn resolve_non_indexed_action(
     key: &TerminalKey,
     dispatch: KeybindDispatch,
 ) -> Option<KeybindAction> {
-    for (bindings, action) in [
+    action_bindings(keybinds)
+        .find(|(bindings, _)| action_matches(bindings, key, dispatch))
+        .map(|(_, action)| action)
+}
+
+/// Whether a resolved binding opted into prefix repeat.
+pub(crate) fn binding_repeats(keybinds: &Keybinds, binding: &KeybindMatch) -> bool {
+    match binding {
+        KeybindMatch::Action(action) => action_bindings(keybinds)
+            .any(|(bindings, candidate)| candidate == *action && bindings.repeat),
+        KeybindMatch::Command(command) => command.bindings.repeat,
+    }
+}
+
+fn action_bindings(keybinds: &Keybinds) -> impl Iterator<Item = (&ActionKeybinds, KeybindAction)> {
+    [
         (&keybinds.help, KeybindAction::Help),
         (&keybinds.settings, KeybindAction::Settings),
         (&keybinds.workspace_picker, KeybindAction::WorkspacePicker),
@@ -154,12 +169,8 @@ pub(crate) fn resolve_non_indexed_action(
         ),
         (&keybinds.detach, KeybindAction::Detach),
         (&keybinds.goto, KeybindAction::OpenNavigator),
-    ] {
-        if action_matches(bindings, key, dispatch) {
-            return Some(action);
-        }
-    }
-    None
+    ]
+    .into_iter()
 }
 
 pub(crate) fn resolve_custom_command(

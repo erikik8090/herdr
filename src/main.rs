@@ -167,6 +167,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # rename_tab = "prefix+shift+t"
 # previous_tab = "prefix+p"
 # next_tab = "prefix+n"
+# Table form opts a binding into tmux-style repeat: after it fires from the
+# prefix, tapping the same key again within 500ms repeats it without the prefix.
+# focus_pane_left = { key = "prefix+h", repeat = true }
 # move_tab_previous = ""   # optional, e.g. "alt+shift+left" moves the tab toward the front
 # move_tab_next = ""       # optional, e.g. "alt+shift+right" moves the tab toward the back
 # switch_tab = "prefix+1..9"

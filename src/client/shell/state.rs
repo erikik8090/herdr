@@ -923,6 +923,9 @@ pub(crate) struct ClientShellState {
     pub(super) selection_autoscroll: Option<ClientSelectionAutoscroll>,
     pub(super) selection_autoscroll_deadline: Option<std::time::Instant>,
     pub(super) selection_highlight_clear_deadline: Option<std::time::Instant>,
+    /// While set, prefix mode was re-entered by a repeatable binding and ends
+    /// at this deadline.
+    pub(super) prefix_repeat_deadline: Option<std::time::Instant>,
     pub(super) word_selection_gesture: Option<ClientWordSelection>,
     pub(super) word_selection_generation: u64,
     pub(super) copy_mode: Option<ClientCopyModeState>,
@@ -1091,6 +1094,7 @@ impl ClientShellState {
             selection_autoscroll: None,
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
+            prefix_repeat_deadline: None,
             word_selection_gesture: None,
             word_selection_generation: 0,
             copy_mode: None,
@@ -1849,6 +1853,21 @@ impl ClientShellState {
             repaint = true;
         }
         repaint
+    }
+
+    pub(crate) fn tick_prefix_repeat(&mut self, now: std::time::Instant) -> bool {
+        if self
+            .prefix_repeat_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return false;
+        }
+        self.prefix_repeat_deadline = None;
+        if self.mode != ClientShellMode::Prefix {
+            return false;
+        }
+        self.mode = self.copy_or_terminal_mode();
+        true
     }
 
     /// Show a transient client-side action error, restarting its lifetime.
